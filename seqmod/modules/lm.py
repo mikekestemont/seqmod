@@ -458,6 +458,219 @@ class LM(nn.Module):
         return log_probs.sum().data[0] / len(log_probs)
 
 
+class ConditionalLM(nn.Module):
+    """
+    Vanilla RNN-based language model.
+
+    Parameters:
+    ===========
+    - vocab: int, vocabulary size.
+    - emb_dim: int, embedding size.
+    - hid_dim: int, hidden dimension of the RNN.
+    - num_layers: int, number of layers of the RNN.
+    - cell: str, one of GRU, LSTM, RNN.
+    - bias: bool, whether to include bias in the RNN.
+    - dropout: float, amount of dropout to apply in between layers.
+    - tie_weights: bool, whether to tie input and output embedding layers.
+        In case of unequal emb_dim and hid_dim values a linear project layer
+        will be inserted after the RNN to match back to the embedding dim
+    - att_dim: int, whether to add an attention module of dimension `att_dim`
+        over the prefix. No attention will be added if att_dim is None or 0
+    - deepout_layers: int, whether to add deep output after hidden layer and
+        before output projection layer. No deep output will be added if
+        deepout_layers is 0 or None.
+    - deepout_act: str, activation function for the deepout module in camelcase
+    """
+    def __init__(self, vocab, emb_dim, hid_dim, num_layers=1,
+                 cell='GRU', bias=True, dropout=0.0, word_dropout=0.0,
+                 target_code=None, reserved_codes=(),
+                 att_dim=None, tie_weights=False,
+                 deepout_layers=0, deepout_act='MaxOut', nb_conditions=4):
+        self.vocab = vocab
+        self.emb_dim = emb_dim
+        self.hid_dim = hid_dim
+        self.tie_weights = tie_weights
+        self.add_attn = att_dim and att_dim > 0
+        self.add_deepout = deepout_layers and deepout_layers > 0
+        if tie_weights and not self.emb_dim == self.hid_dim:
+            logging.warn("When tying weights, output layer and embedding " +
+                         "layer should have equal size. A projection layer " +
+                         "will be insterted to accomodate for this")
+        self.num_layers = num_layers
+        self.cell = cell
+        self.bias = bias
+        self.has_dropout = bool(dropout)
+        self.dropout = dropout
+        self.nb_conditions = nb_conditions
+        super(ConditionalLM, self).__init__()
+
+        # word dropout
+        self.word_dropout = word_dropout
+        self.target_code = target_code
+        self.reserved_codes = reserved_codes
+        # input embeddings
+        self.embeddings = nn.Embedding(vocab, self.emb_dim)
+        # rnn
+        self.rnn = getattr(nn, cell)(
+            self.emb_dim + nb_conditions, self.hid_dim,
+            num_layers=num_layers, bias=bias, dropout=dropout)
+        # attention
+        if self.add_attn:
+            assert self.cell == 'RNN' or self.cell == 'GRU', \
+                "currently only RNN, GRU supports attention"
+            assert att_dim is not None, "Need to specify att_dim"
+            self.att_dim = att_dim
+            self.attn = AttentionalProjection(
+                self.att_dim, self.hid_dim, self.emb_dim)
+        # deepout
+        if self.add_deepout:
+            self.deepout = DeepOut(
+                in_dim=self.hid_dim,
+                layers=tuple([self.hid_dim] * deepout_layers),
+                activation=deepout_act,
+                dropout=self.dropout)
+        # output projection
+        if self.tie_weights:
+            if self.emb_dim == self.hid_dim:
+                self.project = nn.Linear(self.hid_dim, self.vocab)
+                self.project.weight = self.embeddings.weight
+            else:
+                project = nn.Linear(self.emb_dim, self.vocab)
+                project.weight = self.embeddings.weight
+                self.project = nn.Sequential(
+                    nn.Linear(self.hid_dim, self.emb_dim), project)
+        else:
+            self.project = nn.Linear(self.hid_dim, self.vocab)
+
+    def parameters(self):
+        for p in super(ConditionalLM, self).parameters():
+            if p.requires_grad is True:
+                yield p
+
+    def n_params(self):
+        return sum([p.nelement() for p in self.parameters()])
+
+    def freeze_submodule(self, module, flag=False):
+        for p in getattr(self, module).parameters():
+            p.requires_grad = flag
+
+    def init_hidden_for(self, inp):
+        batch = inp.size(1)
+        size = (self.num_layers, batch, self.hid_dim)
+        h_0 = Variable(inp.data.new(*size).zero_(), requires_grad=False)
+        if self.cell.startswith('LSTM'):
+            c_0 = Variable(inp.data.new(*size).zero_(), requires_grad=False)
+            return h_0, c_0
+        else:
+            return h_0
+
+    def forward(self, inp, conditions, hidden=None, schedule=None, **kwargs):
+        """
+        Parameters:
+        -----------
+        inp: torch.Tensor (seq_len x batch_size)
+
+        Returns:
+        --------
+        outs: torch.Tensor (seq_len * batch_size x vocab)
+        hidden: see output of RNN, GRU, LSTM in torch.nn
+        weights: None or list of weights (batch_size x seq_len),
+            It will only be not None if attention is provided.
+        """
+
+        bsize, seqlen = inp.size()
+
+        inp = word_dropout(
+            inp, self.target_code, p=self.word_dropout,
+            reserved_codes=self.reserved_codes, training=self.training)
+
+        emb = self.embeddings(inp)
+        if self.has_dropout:
+            emb = F.dropout(emb, p=self.dropout, training=self.training)
+
+        #print('embedded:', emb.size())
+        repeated = conditions.repeat(seqlen, 1)
+        #print('repeated:', repeated.size())
+        corrected = repeated.view(bsize, seqlen, repeated.size()[1])
+        #print('corrected:', corrected.size())
+
+        concat = torch.cat([emb, corrected], 2)
+
+        outs, hidden = self.rnn(concat, hidden or self.init_hidden_for(emb))
+        if self.has_dropout:
+            outs = F.dropout(outs, p=self.dropout, training=self.training)
+        weights = None
+        if self.add_attn:
+            outs, weights = self.attn(outs, emb)
+        seq_len, batch, hid_dim = outs.size()
+        outs = outs.view(seq_len * batch, hid_dim)
+        if self.add_deepout:
+            outs = self.deepout(outs)
+        outs = F.log_softmax(self.project(outs))
+        return outs, hidden, weights
+
+    def generate(self, d, seed_texts=None, max_seq_len=25, gpu=False,
+                 method='sample', temperature=1., width=5, ignore_eos=False,
+                 batch_size=10, **kwargs):
+        """
+        Generate text using a specified method (argmax, sample, beam)
+
+        Parameters:
+        -----------
+        d: Dict used during training to fit the vocabulary
+        seed_texts: None or list of sentences to use as seed for the generator
+        max_seq_len: int, maximum number of symbols to be generated. The output
+            might actually be less than this number if the Dict was fitted with
+            a <eos> token (in which case generation will end after the first
+            generated <eos>)
+        gpu: bool, whether to generate on the gpu
+        method: str, one of 'sample', 'argmax', 'beam' (check the corresponding
+            functions in Decoder for more info)
+        temperature: float, temperature for multinomial sampling (only applies
+            to method 'sample')
+        width: int, beam size width (only applies to the 'beam' method)
+        ignore_eos: bool, whether to stop generation after hitting <eos> or not
+        batch_size: int, number of parallel generations (only used if
+            seed_texts is None)
+
+        Returns:
+        --------
+        scores: list of floats, unnormalized scores, one for each hypothesis
+        hyps: list of lists, decoded hypotheses in integer form
+        """
+        if self.training:
+            logging.warn("Generating in training modus!")
+        decoder = Decoder(self, d, gpu=gpu)
+        if method == 'argmax':
+            scores, hyps = decoder.argmax(
+                seed_texts=seed_texts, max_seq_len=max_seq_len,
+                ignore_eos=ignore_eos, **kwargs)
+        elif method == 'sample':
+            scores, hyps = decoder.sample(
+                temperature=temperature, seed_texts=seed_texts,
+                max_seq_len=max_seq_len, ignore_eos=ignore_eos, **kwargs)
+        elif method == 'beam':
+            scores, hyps = decoder.beam(
+                width=width, seed_texts=seed_texts, max_seq_len=max_seq_len,
+                ignore_eos=ignore_eos, **kwargs)
+        else:
+            raise ValueError("Wrong decoding method: %s" % method)
+        if not ignore_eos and d.get_eos() is not None:
+            # strip content after <eos> for each batch
+            hyps = strip_post_eos(hyps, d.get_eos())
+        return [s/len(hyps[idx]) for idx, s in enumerate(scores)], hyps
+
+    def predict_proba(self, inp, gpu=False, **kwargs):
+        if self.training:
+            logging.warn("Generating in training modus!")
+        inp_vec = Variable(torch.LongTensor([inp]), volatile=True)
+        if gpu:
+            inp_vec.cuda()
+        outs, _, _ = self(inp_vec, **kwargs)
+        log_probs = u.select_cols(outs[:-1], inp[1:])
+        return log_probs.sum().data[0] / len(log_probs)
+
+
 class MultiheadLM(LM):
     """
     A variant LM that has multiple output embeddings (one for each of a
