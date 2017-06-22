@@ -588,8 +588,8 @@ class ConditionalLM(nn.Module):
         if self.has_dropout:
             emb = F.dropout(emb, p=self.dropout, training=self.training)
 
-        print('embedded:', emb.size())
-        print('conditions:', conditions.size())
+        #print('embedded:', emb.size())
+        #print('conditions:', conditions.size())
         concat = torch.cat((emb, conditions), 2)
 
         outs, hidden = self.rnn(concat, hidden or self.init_hidden_for(emb))
