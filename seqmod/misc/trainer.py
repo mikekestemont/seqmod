@@ -302,6 +302,68 @@ class Trainer(object):
             self.on_test_end(test_loss)
 
 
+class ConditionalLMTrainer(Trainer):
+    def format_loss(self, loss):
+        """
+        Turn loss into perplexity.
+        """
+        return tuple(math.exp(min(l, 100)) for l in loss)
+
+    def run_batch(self, batch_data, dataset='train', subset=None, **kwargs):
+        # get dataset
+        data = self.datasets[dataset]
+        # compute loss
+
+        if isinstance(data, CyclicBlockDataset):
+            source, targets, head = batch_data
+
+            bsize, seqlen = source.size()
+            conditions = torch.from_numpy(np.ones((bsize, 4),
+                                              dtype='float32'))
+            conditions = Variable(conditions)
+
+            if subset is not None and subset != head:
+                # if subset is given, skip all other subsets
+                return          # skip batch
+            hidden = self.batch_state.get('hidden', {}).get(head, None)
+            output, hidden, _ = self.model(inp=source, conditions=conditions,
+                                           hidden=hidden, head=head)
+            if 'hidden' not in self.batch_state:
+                self.batch_state['hidden'] = {}
+            # dettach hidden from graph
+            self.batch_state['hidden'][head] = repackage_hidden(hidden)
+        else:
+            source, targets = batch_data
+
+            bsize, seqlen = source.size()
+            conditions = torch.from_numpy(np.ones((bsize, 4),
+                                              dtype='float32'))
+            conditions = Variable(conditions)
+
+            hidden = self.batch_state.get('hidden', None)
+            output, hidden, _ = self.model(inp=source, conditions=conditions,
+                                           hidden=hidden)
+            # detach hidden from graph
+            self.batch_state['hidden'] = repackage_hidden(hidden)
+        loss = self.criterion(output, targets.view(-1))
+        # optimize
+        if dataset == 'train':
+            loss.backward(), self.optimizer_step()
+        return (loss.data[0], )
+
+    def on_batch_end(self, batch, loss):
+        if hasattr(self, 'reset_hidden'):
+            if isinstance(next(self.datasets.values()), CyclicBlockDataset):
+                for v in self.batch_state['hidden'].values():
+                    v.zero_()
+            else:
+                self.batch_state['hidden'].zero_()
+
+    def num_batch_examples(self, batch_data):
+        src, trg, *_ = batch_data
+        return trg.nelement()
+
+
 class LMTrainer(Trainer):
     def format_loss(self, loss):
         """
