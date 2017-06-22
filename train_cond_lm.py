@@ -1,6 +1,7 @@
 
 import os
 import sys
+import glob
 
 seed = 1001
 import random                   # nopep8
@@ -21,22 +22,28 @@ from seqmod import utils as u  # nopep8
 from seqmod.misc.trainer import ConditionalLMTrainer               # nopep8
 from seqmod.misc.loggers import StdLogger, VisdomLogger  # nopep8
 from seqmod.misc.optimizer import Optimizer              # nopep8
-from seqmod.misc.dataset import Dict, BlockDataset       # nopep8
+from seqmod.misc.dataset import Dict, ConditionalBlockDataset       # nopep8
 from seqmod.misc.preprocess import text_processor        # nopep8
 from seqmod.misc.early_stopping import EarlyStopping     # nopep8
 
 
 # Load data
 def load_lines(path, processor=text_processor()):
-    lines = []
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if processor is not None:
-                line = processor(line)
-            if line:
-                lines.append(line)
-    return lines
+    lines, conditions = [], []
+    for filename in glob.glob(os.sep.join((path, '/*.txt'))):
+        # retrieve metadata for filename
+        # retrieve condition
+        condition = [0, 0, 1, 0]
+        lines = []
+        with open(filename) as f:
+            for line in f:
+                line = line.strip()
+                if processor is not None:
+                    line = processor(line)
+                if line:
+                    lines.append(line)
+                    conditions.append(condition)
+    return lines, conditions
 
 
 def load_from_file(path):
@@ -129,26 +136,29 @@ if __name__ == '__main__':
         assert args.dict_path, "Processed data requires DICT_PATH"
         data, d = load_from_file(args.path), u.load_model(args.dict_path)
         train, test, valid = BlockDataset(
-            data, d, args.batch_size, args.bptt, gpu=args.gpu, fitted=True
+            data, d, args.batch_size, bptt=args.bptt, gpu=args.gpu, fitted=True
         ).splits(test=0.1, dev=0.1)
         del data
     else:
         print("Processing datasets...")
         proc = text_processor(
             lower=args.lower, num=args.num, level=args.level)
-        train_data = load_lines(args.path + 'train.txt', processor=proc)
-        valid_data = load_lines(args.path + 'valid.txt', processor=proc)
-        test_data = load_lines(args.path + 'test.txt', processor=proc)
+        train_data, train_conditions = load_lines(args.path + 'train', processor=proc)
+        valid_data, valid_conditions = load_lines(args.path + 'valid', processor=proc)
+        test_data, test_conditions = load_lines(args.path + 'test', processor=proc)
         d = Dict(max_size=args.max_size, min_freq=args.min_freq,
                  eos_token=u.EOS, bos_token=u.BOS)
         d.fit(train_data, valid_data)
-        train = BlockDataset(
-            train_data, d, args.batch_size, args.bptt, gpu=args.gpu)
-        valid = BlockDataset(
-            valid_data, d, args.batch_size, args.bptt, gpu=args.gpu,
+        train = ConditionalBlockDataset(
+            examples=train_data, conditions=train_conditions, d=d,
+            batch_size=args.batch_size, bptt=args.bptt, gpu=args.gpu)
+        valid = ConditionalBlockDataset(
+            examples=valid_data, conditions=valid_conditions, d=d,
+            batch_size=args.batch_size, bptt=args.bptt, gpu=args.gpu,
             evaluation=True)
-        test = BlockDataset(
-            test_data, d, args.batch_size, args.bptt, gpu=args.gpu,
+        test = ConditionalBlockDataset(
+            examples=test_data, conditions=test_conditions, d=d,
+            batch_size=args.batch_size, bptt=args.bptt, gpu=args.gpu,
             evaluation=True)
         del train_data, valid_data, test_data
 
