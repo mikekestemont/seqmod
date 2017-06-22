@@ -188,6 +188,7 @@ class Trainer(object):
 
     def validate_model(self, test=False, **kwargs):
         loss, num_examples = self.init_loss(), 0
+        print(self.valid_name, 'vaid')
         dataset = self.datasets[self.test_name if test else self.valid_name]
         for batch_num in range(len(dataset)):
             batch = dataset[batch_num]
@@ -333,12 +334,7 @@ class ConditionalLMTrainer(Trainer):
             # dettach hidden from graph
             self.batch_state['hidden'][head] = repackage_hidden(hidden)
         else:
-            source, targets = batch_data
-
-            bsize, seqlen = source.size()
-            conditions = torch.from_numpy(np.ones((bsize, 4),
-                                              dtype='float32'))
-            conditions = Variable(conditions)
+            source, conditions, targets = batch_data
 
             hidden = self.batch_state.get('hidden', None)
             output, hidden, _ = self.model(inp=source, conditions=conditions,
@@ -360,7 +356,7 @@ class ConditionalLMTrainer(Trainer):
                 self.batch_state['hidden'].zero_()
 
     def num_batch_examples(self, batch_data):
-        src, trg, *_ = batch_data
+        src, cond, trg, *_ = batch_data
         return trg.nelement()
 
 

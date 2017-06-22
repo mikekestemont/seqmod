@@ -7,6 +7,8 @@ seed = 1001
 import random                   # nopep8
 random.seed(seed)
 
+import numpy as np
+
 import torch                    # nopep8
 try:
     torch.cuda.manual_seed(seed)
@@ -33,7 +35,7 @@ def load_lines(path, processor=text_processor()):
     for filename in glob.glob(os.sep.join((path, '/*.txt'))):
         # retrieve metadata for filename
         # retrieve condition
-        condition = [0, 0, 1, 0]
+        condition = np.array([0, 0, 1, 0], dtype='float32')
         lines = []
         with open(filename) as f:
             for line in f:
@@ -187,7 +189,7 @@ if __name__ == '__main__':
         decay_every=args.decay_every)
     criterion = nn.CrossEntropyLoss()
 
-    # create trainer
+    # CrossEntropyLossate trainer
     trainer = ConditionalLMTrainer(model, {"train": train, "test": test, "valid": valid},
                         criterion, optim)
 

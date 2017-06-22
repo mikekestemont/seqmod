@@ -7,6 +7,8 @@ import torch
 import torch.utils.data
 from torch.autograd import Variable
 
+import numpy as np
+
 
 def shuffled(data):
     data = list(data)
@@ -89,6 +91,7 @@ def _block_batchify(vector, batch_size):
     if isinstance(vector, list):
         vector = torch.LongTensor(vector)
     num_batches = len(vector) // batch_size
+    print('number of batches', num_batches)
     batches = vector.narrow(0, 0, num_batches * batch_size)
     batches = batches.view(batch_size, -1).t().contiguous()
     return batches
@@ -98,6 +101,18 @@ def block_batchify(vector, batch_size):
     if isinstance(vector, tuple):
         return tuple(_block_batchify(v, batch_size) for v in vector)
     return _block_batchify(vector, batch_size)
+
+
+def matrix_block_batchify(X, batch_size):
+    X = torch.FloatTensor(torch.from_numpy(np.array(X)))
+    print(X.size(), 'matrix 1')
+    num_batches = X.size(0) // batch_size
+    print('number of batches', num_batches)
+    batches = X.narrow(0, 0, num_batches * batch_size)
+    batches = batches.view(-1, batch_size, batches.size(1))
+    print(batches.size(), 'matrix 2')
+    return batches
+    
 
 
 class Dict(object):
@@ -413,6 +428,137 @@ class BlockDataset(Dataset):
             return tuple(zip(*(self._getitem(d, idx) for d in self.data)))
         else:
             return self._getitem(self.data, idx)
+
+    def split_data(self, start, stop):
+        """
+        Compute a split on the dataset for a batch range defined by start, stop
+        """
+        if isinstance(self.data, tuple):
+            return tuple(d.t().contiguous().view(-1)[start:stop]
+                         for d in self.data)
+        else:
+            return self.data.t().contiguous().view(-1)[start:stop]
+
+    def splits(self, test=0.1, dev=0.1):
+        """
+        Computes splits according to test and dev proportions (whose sum can't
+        be higher than 1). In case of a multi-source dataset, the output is
+        respectively a dataset containing the partition for each source in the
+        same shape as the original (non-partitioned) dataset.
+
+        Returns:
+        ========
+
+        tuple of BlockDataset's
+        """
+        n_element = len(self) * self.bptt * self.batch_size  # min num elements
+        datasets, splits = [], get_splits(n_element, test, dev=dev)
+        for idx, (start, stop) in enumerate(zip(splits, splits[1:])):
+            evaluation = self.evaluation if idx == 0 else True
+            datasets.append(type(self)(
+                self.split_data(start, stop), self.d, self.batch_size,
+                self.bptt, fitted=True, gpu=self.gpu, evaluation=evaluation))
+        return tuple(datasets)
+
+    @classmethod
+    def splits_from_data(cls, data, d, batch_size, bptt,
+                         gpu=False, test=0.1, dev=0.1, evaluation=False):
+        """
+        Shortcut classmethod for loading splits from a vector-serialized
+        corpus. It can be used to avoid creating the parent dataset before
+        creating the children splits if the data is already in vector form.
+        """
+        datasets, splits = [], get_splits(len(data), test, dev=dev)
+        for idx, (start, stop) in enumerate(zip(splits, splits[1:])):
+            evaluation = evaluation if idx == 0 else True
+            datasets.append(cls(data[start:stop], d, batch_size, bptt,
+                                fitted=True, gpu=gpu, evaluation=evaluation))
+        return tuple(datasets)
+
+
+class ConditionalBlockDataset(Dataset):
+    """
+    Dataset class for autoregressive models.
+
+    Parameters:
+    ===========
+    - examples: list of source sequences where each input sequence is a list,
+        Multiple input can be used by passing a tuple of input sequences.
+        In the latter case the each batch will be a tuple with entries
+        corresponding to the different domains in the same order as passed
+        to the constructor, and the input to d must be a tuple in which each
+        entry is a Dict fitted to the corresponding input domain.
+        If fitted is False, the lists are supposed to be already transformed
+        into a single long vector.
+    - d: Dict (or tuple of Dicts for multi-input) already fitted.
+    - batch_size: int,
+    - bptt: int,
+        Backprop through time (max context the RNN conditions predictions on)
+    """
+    def __init__(self, examples, conditions, d, batch_size, bptt,
+                 fitted=False, gpu=False, evaluation=False):
+        print('.....')
+        if not fitted:
+            examples, conditions = self._fit(examples, conditions, d)
+        if len(examples) // batch_size == 0:
+            raise ValueError("Not enough data [%d] for a batch size [%d]" %
+                             (len(examples), batch_size))
+        self.data = block_batchify(examples, batch_size)
+        self.conditions = matrix_block_batchify(conditions, batch_size)
+
+        self.d = d
+        self.batch_size = batch_size
+        self.bptt = bptt
+        self.fitted = fitted
+        self.gpu = gpu
+        self.evaluation = evaluation
+
+    def _fit(self, examples, conditions, d):
+        examples_, conditions_ = [], []
+        for seq, cond in zip(examples, conditions):
+            for s in d.transform(seq):
+                examples_.append(s)
+                conditions_.append(cond)
+        return examples_, conditions_
+
+    def _getitem(self, data, conditions, idx):
+        """
+        General function to get the source data to compute the batch. This
+        should be overwritten by subclasses in which the source data isn't
+        always stored in self.data, e.g. the case of cyclical subset access.
+        """
+        idx *= self.bptt
+        seq_len = min(self.bptt, len(data) - 1 - idx)
+        src = Variable(data[idx:idx+seq_len], volatile=self.evaluation)
+        cond = Variable(conditions[idx:idx+seq_len], volatile=self.evaluation)
+        trg = Variable(data[idx+1:idx+seq_len+1], volatile=self.evaluation)
+        if self.gpu:
+            src, cond, trg = src.cuda(), cond.cuda(), trg.cuda()
+        return src, cond, trg
+
+    def __len__(self):
+        """
+        The length of the dataset is computed as the number of bptt'ed batches
+        to conform the way batches are computed. See __getitem__.
+        """
+        if isinstance(self.data, tuple):
+            return len(self.data[0]) // self.bptt
+        return len(self.data) // self.bptt
+
+    def __getitem__(self, idx):
+        """
+        Item getter for batch number idx.
+
+        Returns:
+        ========
+        - src: torch.LongTensor of maximum size self.bptt x self.batch_size
+        - trg: torch.LongTensor of maximum size self.bptt x self.batch_size,
+            corresponding to a shifted batch
+        """
+        if isinstance(self.data, tuple):
+            return tuple(zip(*(self._getitem(d, idx) for d in self.data)))
+        else:
+            return self._getitem(self.data, self.conditions, idx)
 
     def split_data(self, start, stop):
         """
