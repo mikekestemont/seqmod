@@ -88,16 +88,11 @@ def get_dict_pad_(d):
 
 
 def _block_batchify(vector, batch_size):
-    #print('VECTOR')
     if isinstance(vector, list):
         vector = torch.LongTensor(vector)
-    #print('orig len', vector.size())
     num_batches = len(vector) // batch_size
-    #print('number of batches', num_batches)
     batches = vector.narrow(0, 0, num_batches * batch_size)
-    #print('truncated', batches.size())
     batches = batches.view(batch_size, -1).t().contiguous()
-    #print(batches.size(), 'AAAAAA')
     return batches
 
 
@@ -108,15 +103,10 @@ def block_batchify(vector, batch_size):
 
 
 def matrix_block_batchify(X, batch_size):
-    #print('MATRIX')
     X = torch.FloatTensor(torch.from_numpy(np.array(X)))
-    #print('orig len', X.size())
     num_batches = X.size(0) // batch_size
-    #print('number of batches', num_batches)
     batches = X.narrow(0, 0, num_batches * batch_size)
-    #print('truncated', batches.size())
     batches = batches.view(-1, batch_size, 4).contiguous()
-    #print(batches.size(), 'BBB')
     return batches
     
 
@@ -502,7 +492,6 @@ class ConditionalBlockDataset(Dataset):
     """
     def __init__(self, examples, conditions, d, batch_size, bptt,
                  fitted=False, gpu=False, evaluation=False):
-        print('>>>>')
         if not fitted:
             examples, conditions = self._fit(examples, conditions, d)
         if len(examples) // batch_size == 0:
