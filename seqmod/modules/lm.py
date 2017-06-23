@@ -112,13 +112,55 @@ class Decoder(object):
             scores += score.data
         return scores.tolist(), list(zip(*hyps))
 
+    def conditional_sample(self, temperature=1, seed_texts=None, max_seq_len=25,
+                           seed_conditions=None, batch_size=10, ignore_eos=False,
+                           nb_conditions=4, **kwargs):
+        prev, hidden = self.seed(seed_texts, batch_size)
+        batch = prev.size(1)
+        hyps, scores, finished = [], 0, np.array([False] * batch)
+        if not seed_conditions:
+            # all-one conditions:
+            seed_conditions = Variable(torch.ones(prev.size(1),
+                                       nb_conditions)).unsqueeze(0)            
+        elif seed_conditions == 'eye':
+            # variety of conditions through repeating eye matrix:
+            seed_conditions = torch.eye(nb_conditions, nb_conditions)
+            n = prev.size(1) // nb_conditions + 1
+            seed_conditions = seed_conditions.repeat(n, 1)
+            seed_conditions = seed_conditions.narrow(0, 0, prev.size(1))
+            seed_conditions = Variable(seed_conditions.unsqueeze(0))
+        else:
+            # repeat a single conditions
+            if isinstance(seed_conditions, list) \
+                and len(seed_conditions) == nb_conditions:
+                seed_conditions = torch.FloatTensor(seed_conditions)
+                seed_conditions = seed_conditions.repeat(prev.size(1), 1)
+                seed_conditions = Variable(seed_conditions.unsqueeze(0))
+            # different conditions manually specified for each generation:
+            elif isinstance(seed_conditions, list) \
+                and len(seed_conditions) == prev.size(1):
+                seed_conditions = torch.FloatTensor(seed_conditions)
+                seed_conditions = Variable(seed_conditions.unsqueeze(0))
+        for _ in range(max_seq_len):
+            outs, hidden, _ = self.model(prev, conditions=seed_conditions,
+                                         hidden=hidden, **kwargs)
+            prev = outs.div(temperature).exp_().multinomial().t()
+            scores += u.select_cols(outs.data.cpu(), prev.squeeze().data.cpu())
+            hyps.append(prev.squeeze().data.tolist())
+            if self.eos is not None and not ignore_eos:
+                mask = (prev.squeeze().data == self.eos).cpu().numpy() == 1
+                finished[mask] = True
+                if all(finished == True):  # nopep8
+                    break
+        return scores.tolist(), list(zip(*hyps))    
+
     def sample(self, temperature=1, seed_texts=None, max_seq_len=25,
                batch_size=10, ignore_eos=False, **kwargs):
         prev, hidden = self.seed(seed_texts, batch_size)
         batch = prev.size(1)
         hyps, scores, finished = [], 0, np.array([False] * batch)
         for _ in range(max_seq_len):
-            outs, hidden, _ = self.model(prev, hidden=hidden, **kwargs)
+            outs, hidden, _ = self.model(examples=prev, hidden=hidden, **kwargs)
             prev = outs.div(temperature).exp_().multinomial().t()
             scores += u.select_cols(outs.data.cpu(), prev.squeeze().data.cpu())
             hyps.append(prev.squeeze().data.tolist())
@@ -512,7 +554,7 @@ class ConditionalLM(nn.Module):
         self.embeddings = nn.Embedding(vocab, self.emb_dim)
         # rnn
         self.rnn = getattr(nn, cell)(
-            self.emb_dim + nb_conditions, self.hid_dim,
+            self.emb_dim + self.nb_conditions, self.hid_dim,
             num_layers=num_layers, bias=bias, dropout=dropout)
         # attention
         if self.add_attn:
@@ -605,7 +647,8 @@ class ConditionalLM(nn.Module):
         outs = F.log_softmax(self.project(outs))
         return outs, hidden, weights
 
-    def generate(self, d, seed_texts=None, max_seq_len=25, gpu=False,
+    def generate(self, d, seed_texts=None, seed_condition=None,
+                 max_seq_len=25, gpu=False, nb_conditions=None,
                  method='sample', temperature=1., width=5, ignore_eos=False,
                  batch_size=10, **kwargs):
         """
@@ -638,17 +681,19 @@ class ConditionalLM(nn.Module):
             logging.warn("Generating in training modus!")
         decoder = Decoder(self, d, gpu=gpu)
         if method == 'argmax':
-            scores, hyps = decoder.argmax(
-                seed_texts=seed_texts, max_seq_len=max_seq_len,
-                ignore_eos=ignore_eos, **kwargs)
-        elif method == 'sample':
-            scores, hyps = decoder.sample(
-                temperature=temperature, seed_texts=seed_texts,
+            scores, hyps = decoder.conditional_argmax(
+                seed_texts=seed_texts, seed_conditions=seed_condition,
                 max_seq_len=max_seq_len, ignore_eos=ignore_eos, **kwargs)
+        elif method == 'sample':
+            scores, hyps = decoder.conditional_sample(
+                temperature=temperature, seed_texts=seed_texts,
+                seed_conditions=seed_condition, max_seq_len=max_seq_len,
+                ignore_eos=ignore_eos, nb_conditions=nb_conditions,
+                **kwargs)
         elif method == 'beam':
             scores, hyps = decoder.beam(
-                width=width, seed_texts=seed_texts, max_seq_len=max_seq_len,
-                ignore_eos=ignore_eos, **kwargs)
+                width=width, seed_texts=seed_texts, seed_conditions=seed_conditions,
+                max_seq_len=max_seq_len, ignore_eos=ignore_eos, **kwargs)
         else:
             raise ValueError("Wrong decoding method: %s" % method)
         if not ignore_eos and d.get_eos() is not None:
