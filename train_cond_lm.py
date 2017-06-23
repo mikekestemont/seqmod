@@ -32,10 +32,18 @@ from seqmod.misc.early_stopping import EarlyStopping     # nopep8
 # Load data
 def load_lines(path, processor=text_processor()):
     lines, conditions = [], []
+    import os
     for filename in glob.glob(os.sep.join((path, '/*.txt'))):
         # retrieve metadata for filename
         # retrieve condition
-        condition = np.array([0, 0, 1, 0], dtype='float32')
+        # now still a stub...
+        bn = os.path.basename(filename).lower()
+        if bn.startswith('dickens'):
+            condition = np.array([1, 0], dtype='float32')    
+        elif bn.startswith('austen'):
+            condition = np.array([0, 1], dtype='float32')    
+        else:
+            condition = np.array([0, 0], dtype='float32')
         lines = []
         with open(filename) as f:
             for line in f:
@@ -197,6 +205,7 @@ if __name__ == '__main__':
     trainer = ConditionalLMTrainer(model, {"train": train, "test": test, "valid": valid},
                         criterion, optim)
 
+    STUB = [[1, 0] for i in range(4)] + [[0, 1] for i in range(4)] + [[0.5, 0.5] for i in range(2)]
     # hooks
     early_stopping = None
     if args.early_stopping > 0:
@@ -204,7 +213,8 @@ if __name__ == '__main__':
     model_check_hook = make_lm_check_hook(
         d, method=args.decoding_method, temperature=args.temperature,
         max_seq_len=args.max_seq_len, seed_text=args.seed,
-        seed_condition=args.condition, gpu=args.gpu,
+        #seed_condition=args.condition, gpu=args.gpu,
+        seed_condition=STUB, gpu=args.gpu,
         #seed_condition=[[0, 0, 1, 0] for i in range(10)], gpu=args.gpu,
         early_stopping=early_stopping, nb_conditions=args.nb_conditions)
     num_checkpoints = len(train) // (args.checkpoint * args.hooks_per_epoch)
