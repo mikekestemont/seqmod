@@ -106,9 +106,9 @@ def matrix_block_batchify(X, batch_size):
     X = torch.FloatTensor(torch.from_numpy(np.array(X)))
     num_batches = X.size(0) // batch_size
     batches = X.narrow(0, 0, num_batches * batch_size)
-    batches = batches.view(-1, batch_size, 4).contiguous()
+    batches = batches.view(-1, batch_size, X.size(1)).contiguous()
     return batches
-    
+
 
 class Dict(object):
     """
