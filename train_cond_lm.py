@@ -63,8 +63,9 @@ def load_from_file(path):
 # hook
 def make_lm_check_hook(d, seed_text, max_seq_len=25, gpu=False,
                        method='sample', temperature=1, width=5,
-                       early_stopping=None, validate=True):
-
+                       early_stopping=None, validate=True,
+                       seed_condition=None, nb_conditions=None):
+    
     def hook(trainer, epoch, batch_num, checkpoint):
         trainer.log("info", "Checking training...")
         if validate:
@@ -75,7 +76,8 @@ def make_lm_check_hook(d, seed_text, max_seq_len=25, gpu=False,
                 early_stopping.add_checkpoint(loss)
         trainer.log("info", "Generating text...")
         scores, hyps = trainer.model.generate(
-            d, seed_text=seed_text, max_seq_len=max_seq_len, gpu=gpu,
+            d, seed_text=seed_text, seed_condition=seed_condition,
+            max_seq_len=max_seq_len, gpu=gpu, nb_conditions=nb_conditions,
             method=method, temperature=temperature, width=width)
         hyps = [u.format_hyp(score, hyp, hyp_num + 1, d)
                 for hyp_num, (score, hyp) in enumerate(zip(scores, hyps))]
@@ -122,6 +124,8 @@ if __name__ == '__main__':
     parser.add_argument('--early_stopping', default=-1, type=int)
     # - check
     parser.add_argument('--seed', default=None)
+    parser.add_argument('--condition', default=None)
+    parser.add_argument('--nb_conditions', type=int)
     parser.add_argument('--decoding_method', default='sample')
     parser.add_argument('--max_seq_len', default=25, type=int)
     parser.add_argument('--temperature', default=1, type=float)
@@ -174,7 +178,7 @@ if __name__ == '__main__':
                deepout_layers=args.deepout_layers,
                deepout_act=args.deepout_act, word_dropout=args.word_dropout,
                target_code=d.get_unk(),
-               nb_conditions=4)
+               nb_conditions=args.nb_conditions)
 
     model.apply(u.make_initializer())
     if args.gpu:
@@ -199,8 +203,10 @@ if __name__ == '__main__':
         early_stopping = EarlyStopping(args.early_stopping)
     model_check_hook = make_lm_check_hook(
         d, method=args.decoding_method, temperature=args.temperature,
-        max_seq_len=args.max_seq_len, seed_text=args.seed, gpu=args.gpu,
-        early_stopping=early_stopping)
+        max_seq_len=args.max_seq_len, seed_text=args.seed,
+        seed_condition=args.condition, gpu=args.gpu,
+        #seed_condition=[[0, 0, 1, 0] for i in range(10)], gpu=args.gpu,
+        early_stopping=early_stopping, nb_conditions=args.nb_conditions)
     num_checkpoints = len(train) // (args.checkpoint * args.hooks_per_epoch)
     trainer.add_hook(model_check_hook, num_checkpoints=num_checkpoints)
 
