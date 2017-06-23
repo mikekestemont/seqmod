@@ -188,7 +188,6 @@ class Trainer(object):
 
     def validate_model(self, test=False, **kwargs):
         loss, num_examples = self.init_loss(), 0
-        print(self.valid_name, 'vaid')
         dataset = self.datasets[self.test_name if test else self.valid_name]
         for batch_num in range(len(dataset)):
             batch = dataset[batch_num]
@@ -317,11 +316,6 @@ class ConditionalLMTrainer(Trainer):
 
         if isinstance(data, CyclicBlockDataset):
             source, targets, head = batch_data
-
-            bsize, seqlen = source.size()
-            conditions = torch.from_numpy(np.ones((bsize, 4),
-                                              dtype='float32'))
-            conditions = Variable(conditions)
 
             if subset is not None and subset != head:
                 # if subset is given, skip all other subsets
