@@ -141,6 +141,8 @@ class Decoder(object):
                 and len(seed_conditions) == prev.size(1):
                 seed_conditions = torch.FloatTensor(seed_conditions)
                 seed_conditions = Variable(seed_conditions.unsqueeze(0))
+        if self.gpu:
+            seed_conditions = seed_conditions.cuda()
         for _ in range(max_seq_len):
             outs, hidden, _ = self.model(prev, conditions=seed_conditions,
                                          hidden=hidden, **kwargs)
@@ -630,9 +632,12 @@ class ConditionalLM(nn.Module):
         if self.has_dropout:
             emb = F.dropout(emb, p=self.dropout, training=self.training)
 
-        #print('embedded:', emb.size())
-        #print('conditions:', conditions.size())
-        concat = torch.cat((emb, conditions), 2)
+        try:
+            concat = torch.cat((emb, conditions), 2)
+        except:
+            print('embedded:', emb.size())
+            print('conditions:', conditions.size())
+            raise ValueError
 
         outs, hidden = self.rnn(concat, hidden or self.init_hidden_for(emb))
         if self.has_dropout:

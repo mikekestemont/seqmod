@@ -32,8 +32,8 @@ from seqmod.misc.early_stopping import EarlyStopping     # nopep8
 # Load data
 def load_lines(path, processor=text_processor()):
     lines, conditions = [], []
-    import os
     for filename in glob.glob(os.sep.join((path, '/*.txt'))):
+        print(filename)
         # retrieve metadata for filename
         # retrieve condition
         # now still a stub...
@@ -44,7 +44,6 @@ def load_lines(path, processor=text_processor()):
             condition = np.array([0, 1], dtype='float32')    
         else:
             condition = np.array([0, 0], dtype='float32')
-        lines = []
         with open(filename) as f:
             for line in f:
                 line = line.strip()
