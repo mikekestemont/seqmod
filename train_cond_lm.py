@@ -28,30 +28,75 @@ from seqmod.misc.dataset import Dict, ConditionalBlockDataset       # nopep8
 from seqmod.misc.preprocess import text_processor        # nopep8
 from seqmod.misc.early_stopping import EarlyStopping     # nopep8
 
+import pandas as pd
+from collections import Counter
+
+
+class Metadata(object):
+
+    def __init__(self, path='metainfo-master.csv'):
+
+        self.path = path
+        meta = pd.read_csv(path)
+        meta = meta.set_index('filepath')
+        selected = sorted('Aspe Cookson Coben'.split())
+        self.idx = {}
+        for s in selected:
+            self.idx[s] = len(self.idx)
+        self.meta = meta.loc[meta['author:lastname'].isin(selected)]
+        self.default = np.zeros(len(self.idx), dtype='float32')
+
+    def split_filenames(self, indir):
+        conds, filenames = [], []
+        for filepath in glob.glob(indir+'/*.txt'):
+            fp = os.path.basename(filepath)
+            fn, _ = os.path.splitext(fp)
+            try:
+                auth = self.meta.loc[fn]['author:lastname']
+                filenames.append(filepath)
+                conds.append(auth)
+            except KeyError:
+                pass
+
+        from sklearn.model_selection import train_test_split
+        train_conds, valid_conds, train_names, valid_names \
+            = train_test_split(conds, filenames,
+                               stratify=conds,
+                               test_size=len(self.idx))
+        train_conds, test_conds, train_names, test_names \
+            = train_test_split(train_conds, train_names,
+                               stratify=train_conds,
+                               test_size=len(self.idx))
+        
+        return train_names, valid_names, test_names
+
+    def conditions_from_path(self, filepath):
+        fp = os.path.basename(filepath)
+        fn, _ = os.path.splitext(fp)
+        try:
+            auth = self.meta.loc[fn]['author:lastname']
+            v = self.default.copy()
+            v[self.idx[auth]] = np.float32(1)
+            return v
+        except KeyError:
+            return None
+
 
 # Load data
-def load_lines(path, processor=text_processor()):
+def load_lines(names, processor=text_processor(),
+               meta=None):
     lines, conditions = [], []
-    for filename in glob.glob(os.sep.join((path, '/*.txt'))):
-        print(filename)
-        # retrieve metadata for filename
-        # retrieve condition
-        # now still a stub...
-        bn = os.path.basename(filename).lower()
-        if bn.startswith('dickens'):
-            condition = np.array([1, 0], dtype='float32')    
-        elif bn.startswith('austen'):
-            condition = np.array([0, 1], dtype='float32')    
-        else:
-            condition = np.array([0, 0], dtype='float32')
-        with open(filename) as f:
-            for line in f:
-                line = line.strip()
-                if processor is not None:
-                    line = processor(line)
-                if line:
-                    lines.append(line)
-                    conditions.append(condition)
+    for filename in names:
+        conds = meta.conditions_from_path(filename)
+        if isinstance(conds, np.ndarray):
+            with open(filename) as f:
+                for line in f:
+                    line = line.strip()
+                    if processor is not None:
+                        line = processor(line)
+                    if line:
+                        lines.append(line)
+                        conditions.append(conds)
     return lines, conditions
 
 
@@ -72,7 +117,7 @@ def make_lm_check_hook(d, seed_text, max_seq_len=25, gpu=False,
                        method='sample', temperature=1, width=5,
                        early_stopping=None, validate=True,
                        seed_condition=None, nb_conditions=None):
-    
+
     def hook(trainer, epoch, batch_num, checkpoint):
         trainer.log("info", "Checking training...")
         if validate:
@@ -154,11 +199,20 @@ if __name__ == '__main__':
         del data
     else:
         print("Processing datasets...")
+        meta = Metadata(path='metainfo-master.csv')
+        train_names, valid_names, test_names = meta.split_filenames(args.path)
+
         proc = text_processor(
             lower=args.lower, num=args.num, level=args.level)
-        train_data, train_conditions = load_lines(args.path + 'train', processor=proc)
-        valid_data, valid_conditions = load_lines(args.path + 'valid', processor=proc)
-        test_data, test_conditions = load_lines(args.path + 'test', processor=proc)
+        train_data, train_conditions = load_lines(names=train_names,
+                                                  processor=proc,
+                                                  meta=meta)
+        valid_data, valid_conditions = load_lines(names=valid_names,
+                                                  processor=proc,
+                                                  meta=meta)
+        test_data, test_conditions = load_lines(names=test_names,
+                                                  processor=proc,
+                                                  meta=meta)
         d = Dict(max_size=args.max_size, min_freq=args.min_freq,
                  eos_token=u.EOS, bos_token=u.BOS)
         d.fit(train_data, valid_data)
@@ -204,7 +258,7 @@ if __name__ == '__main__':
     trainer = ConditionalLMTrainer(model, {"train": train, "test": test, "valid": valid},
                         criterion, optim)
 
-    STUB = [[1, 0] for i in range(4)] + [[0, 1] for i in range(4)] + [[0.5, 0.5] for i in range(2)]
+    STUB = [[1, 0, 0] for i in range(4)] + [[0, 1, 0] for i in range(3)] + [[0, 0, 1] for i in range(3)]
     # hooks
     early_stopping = None
     if args.early_stopping > 0:
